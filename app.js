@@ -5,6 +5,50 @@
 
 const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSr7fJ8DueekLf9xh672BYHJ_8BUH26reOsA6GC1V7SSYG-2A-idNzu7r9JLQJhP7FlMd3iwvXCzbDE/pub?gid=53413515&single=true&output=csv";
 
+// The old Wix directory, imported and reconciled once, published as its
+// own separate sheet tab/CSV (NOT mixed into the main sheet's Form
+// Responses -> Public Data formula chain, which is just a row-for-row
+// mirror pre-filled many rows ahead for future form submissions --
+// splicing legacy rows into unused rows there would eventually collide
+// with a real submission landing on the same row). Same column layout
+// as the main sheet (see COL below), so it's parsed with the same logic;
+// every row from this feed is treated as legacy, unconditionally.
+const LEGACY_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSr7fJ8DueekLf9xh672BYHJ_8BUH26reOsA6GC1V7SSYG-2A-idNzu7r9JLQJhP7FlMd3iwvXCzbDE/pub?gid=1584016534&single=true&output=csv";
+
+// On/after this date the legacy feed is ignored entirely -- those ~90
+// imported-but-unconfirmed people simply stop appearing, rather than
+// sitting at "Waitlist Available" forever. By then the import is over a
+// year stale and not worth carrying any further.
+const LEGACY_CUTOFF_DATE = new Date("2028-01-01T00:00:00");
+
+// Quarterly "are you still accepting?" attestation form responses.
+// Columns (0-indexed): 0 = Timestamp, 1 = First Name, 2 = Last Name,
+// 3 = their selected accepting-status option (single-choice/multiple-choice
+// question, not checkboxes, so normally exactly one value). Matched
+// against providers by normalized first+last name (not email -- not
+// every provider has one).
+const ATTESTATION_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT4ADkkAjmT1fdA9q_EClvII0AAd3nQhvFlzf1H2wIJx2bJ_0qWaBQHLPOfdURXvmZdcypEQ-Arfrzf/pub?output=csv";
+
+// A provider whose most recent attestation is older than this is
+// considered stale and gets bumped to "Waitlist Available" regardless of
+// what the main sheet says. ~100 days gives about a 3-week grace period
+// past the raw 3-month cadence for mailing-list/reminder lag.
+const ATTESTATION_STALE_DAYS = 100;
+
+// Providers who have NEVER submitted an attestation are left alone (main
+// sheet status trusted as-is) until this date, to give the quarterly
+// system time to ramp up before anyone is penalized for not having used
+// it yet. From this date on, "never attested" is treated the same as "an
+// attestation so old it's stale" -- i.e. bumped to Waitlist Available.
+const NEVER_ATTESTED_GRACE_UNTIL = new Date("2027-04-01T00:00:00");
+
+// Defensive: the question is multiple-choice (single answer) now, not
+// checkboxes, so there's normally exactly one value here. If a legacy/
+// malformed row somehow has more than one, the most restrictive/cautious
+// option wins (better to under-promise than send someone to a provider
+// who is actually not taking new patients).
+const ATTESTATION_CONFLICT_PRIORITY = ["No", "By PCP Referral Only", "Waitlist Available", "Yes"];
+
 // Column positions in the published sheet (0-indexed).
 // Columns 17 (notes) and 18 (listserv email) are intentionally
 // never read into the display objects below.
@@ -134,6 +178,18 @@ function clean(v) {
   return isNA(t) ? "" : t;
 }
 
+// Normalizes a typed full name for matching: lowercase, strip quotes/
+// punctuation (people type nicknames like "Jaye" or middle initials
+// inconsistently), collapse whitespace. Not foolproof against typos, but
+// catches the common formatting noise seen in this roster's name data.
+function normalizeName(v) {
+  return String(v || "")
+    .toLowerCase()
+    .replace(/["'‘’“”.,]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function splitExact(value) {
   if (!value) return [];
   return String(value).split(",").map(v => v.trim()).filter(Boolean);
@@ -190,19 +246,57 @@ function ageGroupsDisplay(value) {
   return value;
 }
 
+// Fetches text from a CSV URL, returning "" (never throwing) on failure.
+// Used for the two optional/supplementary feeds (legacy, attestations) so
+// a hiccup in either never takes down the whole directory; the required
+// main-sheet fetch is handled separately below since its failure should
+// surface as an error.
+async function fetchTextOrEmpty(url, label) {
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) {
+      console.error(label + " fetch failed with status " + res.status);
+      return "";
+    }
+    return await res.text();
+  } catch (err) {
+    console.error(label + " fetch failed:", err);
+    return "";
+  }
+}
+
 /* ---------------- Load + transform ---------------- */
 async function loadData() {
-  const res = await fetch(SHEET_CSV_URL, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to load provider data: " + res.status);
-  const text = await res.text();
-  const rows = parseCSV(text).filter(r => r.length > 1);
+  // All three sheets are independent published CSVs on separate Google
+  // endpoints, so there's no reason to wait on one before starting the
+  // next -- fetch them all in parallel rather than one after another.
+  const [mainText, legacyText, attestationText] = await Promise.all([
+    fetch(SHEET_CSV_URL, { cache: "no-store" }).then(res => {
+      if (!res.ok) throw new Error("Failed to load provider data: " + res.status);
+      return res.text();
+    }),
+    fetchTextOrEmpty(LEGACY_CSV_URL, "Legacy import"),
+    fetchTextOrEmpty(ATTESTATION_CSV_URL, "Attestation")
+  ]);
+
+  const rows = parseCSV(mainText).filter(r => r.length > 1);
   rows.shift(); // drop header row
 
-  // Map keyed by a per-provider identity; later rows (later form
-  // submissions, since Form Responses always append chronologically)
-  // overwrite earlier ones with the same identity, so duplicate/stale
-  // entries for the same provider automatically collapse to the most
-  // recently submitted row.
+  // Map keyed by a per-provider identity. When two rows share an identity
+  // (duplicate/updated submissions for the same provider), the row with
+  // the LATER parsed Timestamp wins, regardless of where it sits in the
+  // sheet. A row whose timestamp can't be parsed is treated as oldest
+  // (loses any tie against a row with a real timestamp), and when
+  // timestamps are exactly equal (or both unparseable) the later row in
+  // sheet order still wins.
+  //
+  // Legacy rows (from the separate LEGACY_CSV_URL feed, see below) are
+  // handled in a second pass further down: they NEVER compete on
+  // timestamp against a row from the main sheet for the same identity,
+  // because a legacy row's stamped date (its old Wix "created" date) has
+  // no reliable relationship to how current the matching live entry
+  // actually is. A legacy row only ever fills a gap where no current
+  // entry exists at all for that person.
   const byIdentity = new Map();
 
   for (const r of rows) {
@@ -215,6 +309,14 @@ async function loadData() {
     if (publishFlag !== "X") continue; // only show rows marked ready
 
     const identityKey = ((firstName + " " + lastName).trim() || organization).toLowerCase();
+
+    const parsedTs = Date.parse(r[COL.timestamp]);
+    const rowTimestamp = Number.isNaN(parsedTs) ? -Infinity : parsedTs;
+
+    const existing = byIdentity.get(identityKey);
+    if (existing && rowTimestamp < existing._timestamp) {
+      continue; // an already-stored row is strictly newer; keep it
+    }
 
     byIdentity.set(identityKey, {
       firstName,
@@ -233,10 +335,128 @@ async function loadData() {
       gender: clean(r[COL.gender]),
       ageGroups: clean(r[COL.ageGroups]),
       languages: clean(r[COL.languages]),
+      isLegacy: false,
+      _timestamp: rowTimestamp,
       _rand: Math.random()
     });
   }
-  return Array.from(byIdentity.values());
+
+  // Second pass: rows from the separate legacy feed only ever fill
+  // identities with no current entry. Among legacy rows competing for the
+  // same still-open identity, the latest-timestamped one wins (same
+  // tie-break logic as above). Legacy entries always display as
+  // "Waitlist Available" regardless of whatever accepting status was in
+  // the old Wix data -- that field is too stale to trust -- and are
+  // flagged isLegacy so they sort below current entries within the same
+  // tier instead of "rising to the top."
+  // Past the cutoff date, skip the legacy feed entirely -- don't even
+  // parse it, just treat it as if it returned nothing.
+  const legacyRows = Date.now() >= LEGACY_CUTOFF_DATE.getTime()
+    ? []
+    : parseCSV(legacyText).filter(r => r.length > 1);
+  if (legacyRows.length) legacyRows.shift(); // drop header row, if present
+
+  for (const r of legacyRows) {
+    const firstName = clean(r[COL.firstName]);
+    const lastName = clean(r[COL.lastName]);
+    const organization = clean(r[COL.organization]);
+    const identityKey = ((firstName + " " + lastName).trim() || organization).toLowerCase();
+
+    if (byIdentity.has(identityKey) && !byIdentity.get(identityKey).isLegacy) continue;
+
+    const parsedTs = Date.parse(r[COL.timestamp]);
+    const rowTimestamp = Number.isNaN(parsedTs) ? -Infinity : parsedTs;
+
+    const existingLegacy = byIdentity.get(identityKey);
+    if (existingLegacy && rowTimestamp < existingLegacy._timestamp) continue;
+
+    byIdentity.set(identityKey, {
+      firstName,
+      lastName,
+      organization,
+      credentials: clean(r[COL.credentials]),
+      email: clean(r[COL.email]),
+      phone: clean(r[COL.phone]),
+      website: clean(r[COL.website]),
+      accepting: "Waitlist Available",
+      format: clean(r[COL.format]),
+      location: clean(r[COL.location]),
+      specialties: clean(r[COL.specialties]),
+      approaches: clean(r[COL.approaches]),
+      insurance: clean(r[COL.insurance]),
+      gender: clean(r[COL.gender]),
+      ageGroups: clean(r[COL.ageGroups]),
+      languages: clean(r[COL.languages]),
+      isLegacy: true,
+      _timestamp: rowTimestamp,
+      _rand: Math.random()
+    });
+  }
+
+  const providers = Array.from(byIdentity.values());
+
+  applyAttestations(providers, attestationText);
+  return providers;
+}
+
+// Applies the quarterly "still accepting?" attestation responses
+// (already fetched as plain text -- see the Promise.all in loadData) to
+// each provider matched by name, either refreshing their accepting
+// status (if they attested recently) or bumping them to "Waitlist
+// Available" (if their attestation has gone stale). Providers who have
+// never submitted an attestation at all are left exactly as the main
+// sheet has them -- Project 2 only kicks in once someone has attested at
+// least once. An empty/unreachable attestation feed (fetchTextOrEmpty
+// already swallowed that error) just means nothing here changes.
+function applyAttestations(providers, attestationText) {
+  const rows = parseCSV(attestationText).filter(r => r.length > 1);
+  if (!rows.length) return;
+  rows.shift(); // drop header row
+
+  const latestByName = new Map();
+  for (const r of rows) {
+    const name = normalizeName((clean(r[1]) + " " + clean(r[2])).trim());
+    if (!name) continue;
+    const ts = Date.parse(r[0]);
+    const timestamp = Number.isNaN(ts) ? -Infinity : ts;
+    const existing = latestByName.get(name);
+    if (!existing || timestamp >= existing.timestamp) {
+      latestByName.set(name, { timestamp, raw: clean(r[3]) });
+    }
+  }
+
+  const now = Date.now();
+  const staleMs = ATTESTATION_STALE_DAYS * 24 * 60 * 60 * 1000;
+
+  for (const p of providers) {
+    const key = normalizeName((p.firstName + " " + p.lastName).trim() || p.organization);
+    const attestation = latestByName.get(key);
+
+    if (!attestation) {
+      // Never attested at all. Left alone (trust whatever the main sheet
+      // / legacy import says) until the grace period ends; from that date
+      // on, "never attested" is treated the same as "stale."
+      if (now >= NEVER_ATTESTED_GRACE_UNTIL.getTime()) p.accepting = "Waitlist Available";
+      continue;
+    }
+
+    if (now - attestation.timestamp > staleMs) {
+      p.accepting = "Waitlist Available";
+      continue;
+    }
+
+    // A real, recent attestation proves this person is actually active --
+    // even if they were originally a legacy-import entry, stop treating
+    // them as a stale legacy record for sorting purposes.
+    p.isLegacy = false;
+
+    const checked = splitExact(attestation.raw);
+    if (!checked.length) continue;
+    const resolved = ATTESTATION_CONFLICT_PRIORITY.find(tier =>
+      checked.some(c => c.toLowerCase() === tier.toLowerCase())
+    );
+    if (resolved) p.accepting = resolved;
+  }
 }
 
 /* ---------------- Dropdown population ---------------- */
@@ -309,6 +529,10 @@ function runFilter() {
     const ta = acceptingTier(a.accepting);
     const tb = acceptingTier(b.accepting);
     if (ta !== tb) return ta - tb;
+    // Within the same accepting tier, legacy-import entries (unresponsive
+    // to repeated requests to confirm their info) sort after everyone
+    // else instead of mixing in randomly.
+    if (a.isLegacy !== b.isLegacy) return a.isLegacy ? 1 : -1;
     return a._rand - b._rand;
   });
 
