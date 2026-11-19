@@ -31,17 +31,65 @@ const COL = {
 
 const NA_VALUES = new Set(["", "n/a", "na", "none", "null", "-", "n.a.", "not applicable"]);
 
+// ---- Canonical option lists, taken directly from the KMHC intake form.
+// Filters only ever offer these choices; a provider's own free-text
+// "Other" answers still display on their card, just aren't filterable.
 const ACCEPTING_TIERS = ["Yes", "Waitlist Available", "By PCP Referral Only", "No"];
-const GENDER_OPTIONS = ["Female", "Male", "Non-binary/gender nonconforming"];
+const ACCEPTING_LABELS = {
+  "yes": "Accepting Patients",
+  "no": "Not Currently Accepting New Patients",
+  "waitlist available": "Waitlist Available",
+  "by pcp referral only": "By PCP Referral Only"
+};
+
+const FORMAT_OPTIONS = ["Telehealth Only", "In-Person Only", "Both telehealth & in-person options"];
+
+const AGE_GROUP_OPTIONS = ["Children (0-12)", "Adolescents (13-17)", "Young adults (18-25)", "Adults (26-64)", "Seniors (65+)"];
+
+const SPECIALTY_OPTIONS = [
+  "Addiction & Substance Use", "ADHD", "Anger Management", "Anxiety/ Panic", "Autism Spectrum Disorder",
+  "Behavioral Problems", "Child & Adolescent", "Chronic Illness/ Pain", "Couples & Relationships",
+  "Depression", "Eating Disorders", "Family Therapy", "Grief & Loss", "Learning Disabilities",
+  "LGBTQ+ Affirming", "Life Transitions/ Adjustments", "OCD", "Parenting/ Co-Parenting",
+  "Perinatal/ Postpartum", "Sleep Problems", "Spiritual/ Religious", "Testing/ Assessments",
+  "Trauma/ PTSD", "Women's Health"
+];
+
+const APPROACH_OPTIONS = [
+  "Accelerated Resolution Therapy", "Acceptance & Commitment Therapy", "Art/ Expressive Arts Therapy",
+  "Brainspotting", "CBT", "CBT-i (for insomnia)", "DBT", "Emotionally Focused Therapy",
+  "Emotional Freedom Technique", "EMDR", "Gottman Method", "Internal Family Systems",
+  "Mindfulness-Based Therapy", "Play Therapy", "Psychodynamic", "Sand Tray Therapy",
+  "Solution-Focused Therapy", "Somatic/ Body-Based Therapy", "Trauma-Focused CBT"
+];
+
+const INSURANCE_OPTIONS = [
+  "HMSA", "HMSA Quest", "HMSA Akamai Advantage", "Blue Cross Blue Shield", "HMAA",
+  "University Health Alliance (UHA)", "United Healthcare (UHC)", "UHC Quest", "UHC Medicare",
+  "Kaiser Permanente", "Aetna", "Cigna", "AlohaCare", "AlohaCare Quest", "AlohaCare Medicare",
+  "Medicare A & B", "Humana", "MDX AARP", "Devoted", "Healthcare Management Administrators (HMA)",
+  "Ohana", "Ohana Quest", "Ohana Medicare", "Tricare", "Triwest", "VA", "AFL Hotel & Restaurant Workers",
+  "Sliding scale available", "Self-pay/ Out of pocket", "Workmans Comp"
+];
+
+const LANGUAGE_OPTIONS = [
+  "ASL (American Sign Language)", "Cantonese", "Tagalog", "Hawaiian", "Illocano", "Japanese",
+  "Korean", "Mandarin", "Marshallese", "Portuguese", "Spanish"
+];
+
+// Gender: the form also includes "Organization with Multiple Practicing
+// Therapists" as a literal choice, but that's handled as a match-all
+// wildcard below, never offered as a selectable filter value itself.
+const GENDER_OPTIONS = ["Female", "Male", "Non-binary/ gender nonconforming"];
 const ORG_GENDER_WILDCARD = "organization with multiple practicing therapists";
 
 const REGIONS = ["North", "East", "Central", "South", "West"];
 const REGION_MAP = {
-  North: ["hanalei", "haena", "ha'ena", "kilauea", "princeville"],
-  East: ["kapaa", "kapa'a", "wailua", "kealia", "anahola", "hanamaulu"],
-  Central: ["lihue", "lihu'e", "puhi", "hanamaulu"],
-  South: ["koloa", "poipu", "po'ipu", "omao", "o'oma'o", "lawai", "kalaheo"],
-  West: ["waimea", "kekaha", "hanapepe", "hanapepe", "eleele", "'ele'ele", "kalaheo"]
+  North: ["hanalei", "kilauea", "princeville"],
+  East: ["kapaa", "wailua", "anahola", "hanamaulu"],
+  Central: ["lihue", "puhi", "hanamaulu"],
+  South: ["koloa", "lawai", "kalaheo"],
+  West: ["waimea", "kekaha", "hanapepe", "eleele", "kalaheo", "kaumakani"]
 };
 
 let ALL_ITEMS = [];
@@ -119,6 +167,29 @@ function acceptingTier(value) {
   return best;
 }
 
+function acceptingDisplay(value) {
+  // Show each exact tier present, relabeled, joined with " / ".
+  const vals = splitExact(value);
+  if (!vals.length) return "";
+  const labels = vals.map(v => ACCEPTING_LABELS[v.toLowerCase()] || v);
+  // de-dupe while preserving order
+  return [...new Set(labels)].join(" / ");
+}
+
+function ageGroupsDisplay(value) {
+  const vals = new Set(splitExact(value).map(v => v.toLowerCase()));
+  const all = AGE_GROUP_OPTIONS.map(v => v.toLowerCase());
+  const adultsSet = ["young adults (18-25)", "adults (26-64)", "seniors (65+)"];
+  const youthSet = ["children (0-12)", "adolescents (13-17)"];
+
+  const equalsSet = (a, b) => a.size === b.length && b.every(v => a.has(v));
+
+  if (equalsSet(vals, all)) return "All Ages";
+  if (equalsSet(vals, adultsSet)) return "Adults";
+  if (equalsSet(vals, youthSet)) return "Children and Adolescents";
+  return value;
+}
+
 /* ---------------- Load + transform ---------------- */
 async function loadData() {
   const res = await fetch(SHEET_CSV_URL, { cache: "no-store" });
@@ -169,13 +240,7 @@ async function loadData() {
 }
 
 /* ---------------- Dropdown population ---------------- */
-function uniqueValuesFor(items, field) {
-  const set = new Set();
-  items.forEach(it => splitExact(it[field]).forEach(v => set.add(v)));
-  return Array.from(set).sort((a, b) => a.localeCompare(b));
-}
-
-function fillSelect(selectEl, options, placeholder) {
+function fillSelect(selectEl, options, placeholder, labelFn) {
   selectEl.innerHTML = "";
   const optAll = document.createElement("option");
   optAll.value = "";
@@ -184,21 +249,26 @@ function fillSelect(selectEl, options, placeholder) {
   options.forEach(opt => {
     const o = document.createElement("option");
     o.value = opt;
-    o.textContent = opt;
+    o.textContent = labelFn ? labelFn(opt) : opt;
     selectEl.appendChild(o);
   });
 }
 
-function populateFilters(items) {
-  fillSelect(document.getElementById("f-accepting"), ACCEPTING_TIERS, "Accepting new patients: Any");
-  fillSelect(document.getElementById("f-insurance"), uniqueValuesFor(items, "insurance"), "Insurance / Payment: Any");
-  fillSelect(document.getElementById("f-format"), uniqueValuesFor(items, "format"), "Telehealth / In-person: Any");
+function populateFilters() {
+  fillSelect(
+    document.getElementById("f-accepting"),
+    ACCEPTING_TIERS,
+    "Accepting new patients: Any",
+    v => ACCEPTING_LABELS[v.toLowerCase()] || v
+  );
+  fillSelect(document.getElementById("f-insurance"), INSURANCE_OPTIONS, "Insurance / Payment: Any");
+  fillSelect(document.getElementById("f-format"), FORMAT_OPTIONS, "Telehealth / In-person: Any");
   fillSelect(document.getElementById("f-location"), REGIONS, "Location: Any region");
-  fillSelect(document.getElementById("f-age"), uniqueValuesFor(items, "ageGroups"), "Age groups: Any");
-  fillSelect(document.getElementById("f-specialties"), uniqueValuesFor(items, "specialties"), "Specialties: Any");
-  fillSelect(document.getElementById("f-approaches"), uniqueValuesFor(items, "approaches"), "Treatment approaches: Any");
-  fillSelect(document.getElementById("f-gender"), GENDER_OPTIONS, "Gender: Any");
-  fillSelect(document.getElementById("f-language"), uniqueValuesFor(items, "languages"), "Language: Any");
+  fillSelect(document.getElementById("f-age"), AGE_GROUP_OPTIONS, "Age groups: Any");
+  fillSelect(document.getElementById("f-specialties"), SPECIALTY_OPTIONS, "Specialties: Any");
+  fillSelect(document.getElementById("f-approaches"), APPROACH_OPTIONS, "Treatment approaches: Any");
+  fillSelect(document.getElementById("f-gender"), GENDER_OPTIONS, "Therapist Gender: Any");
+  fillSelect(document.getElementById("f-language"), LANGUAGE_OPTIONS, "Language: Any");
 }
 
 /* ---------------- Filtering / sorting ---------------- */
@@ -295,6 +365,11 @@ function normalizeWebsite(url) {
   return u;
 }
 
+function displayWebsite(url) {
+  // Strip protocol + trailing slash for a cleaner button label.
+  return url.trim().replace(/^https?:\/\//i, "").replace(/\/$/, "");
+}
+
 function buildCard(it) {
   const card = document.createElement("div");
   card.className = "card";
@@ -309,21 +384,28 @@ function buildCard(it) {
   if (subOrg) html += `<div class="org">${escapeHTML(subOrg)}</div>`;
   if (it.credentials) html += `<div class="credentials">${escapeHTML(it.credentials)}</div>`;
   if (it.accepting) {
-    html += `<span class="accepting ${tierClass(it.accepting)}">${escapeHTML(it.accepting)}</span>`;
+    html += `<span class="accepting ${tierClass(it.accepting)}">${escapeHTML(acceptingDisplay(it.accepting))}</span>`;
   }
   html += fieldRow("Format", it.format);
   html += fieldRow("Location", it.location);
   html += fieldRow("Specialties", it.specialties);
   html += fieldRow("Treatment approaches", it.approaches);
   html += fieldRow("Insurance / Payment", it.insurance);
-  html += fieldRow("Gender", it.gender);
-  html += fieldRow("Age groups served", it.ageGroups);
+  html += fieldRow("Therapist Gender", it.gender);
+  if (it.ageGroups) html += fieldRow("Age groups served", ageGroupsDisplay(it.ageGroups));
   if (it.languages) html += fieldRow("Languages spoken", it.languages);
 
   const contacts = [];
-  if (it.phone) contacts.push(`<a href="tel:${escapeHTML(it.phone.replace(/[^+\d]/g, ""))}">${escapeHTML(it.phone)}</a>`);
-  if (it.email) contacts.push(`<a href="mailto:${escapeHTML(it.email)}">Email</a>`);
-  if (it.website) contacts.push(`<a href="${escapeHTML(normalizeWebsite(it.website))}" target="_blank" rel="noopener">Website</a>`);
+  if (it.phone) {
+    contacts.push(`<a href="tel:${escapeHTML(it.phone.replace(/[^+\d]/g, ""))}"><span class="icon">&#128222;</span>${escapeHTML(it.phone)}</a>`);
+  }
+  if (it.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(it.email)) {
+    contacts.push(`<a href="mailto:${escapeHTML(it.email)}"><span class="icon">&#9993;</span>${escapeHTML(it.email)}</a>`);
+  }
+  if (it.website) {
+    const href = normalizeWebsite(it.website);
+    contacts.push(`<a href="${escapeHTML(href)}" target="_blank" rel="noopener"><span class="icon">&#127760;</span>${escapeHTML(displayWebsite(it.website))}</a>`);
+  }
   if (contacts.length) html += `<div class="contact">${contacts.join("")}</div>`;
 
   card.innerHTML = html;
@@ -347,6 +429,9 @@ function debounce(fn, ms) {
 async function init() {
   const statusLine = document.getElementById("statusLine");
   statusLine.textContent = "Loading providers…";
+
+  populateFilters();
+
   try {
     ALL_ITEMS = await loadData();
   } catch (err) {
@@ -355,14 +440,20 @@ async function init() {
     return;
   }
 
-  populateFilters(ALL_ITEMS);
-
   const debouncedFilter = debounce(runFilter, 200);
   document.getElementById("nameSearch").addEventListener("input", debouncedFilter);
   ["f-accepting", "f-insurance", "f-format", "f-location", "f-age", "f-specialties", "f-approaches", "f-gender", "f-language"]
     .forEach(id => document.getElementById(id).addEventListener("change", runFilter));
   document.getElementById("resetBtn").addEventListener("click", resetFilters);
   document.getElementById("loadMoreBtn").addEventListener("click", () => renderResults(CURRENT_LIST, false));
+
+  const moreBtn = document.getElementById("moreFiltersToggle");
+  const extra = document.getElementById("extraFilters");
+  moreBtn.addEventListener("click", () => {
+    const open = extra.classList.toggle("open");
+    moreBtn.setAttribute("aria-expanded", String(open));
+    moreBtn.innerHTML = open ? "Fewer filters &#9652;" : "More filters &#9662;";
+  });
 
   runFilter();
 }
