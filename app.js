@@ -29,18 +29,22 @@ const LEGACY_CUTOFF_DATE = new Date("2028-01-01T00:00:00");
 // every provider has one).
 const ATTESTATION_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT4ADkkAjmT1fdA9q_EClvII0AAd3nQhvFlzf1H2wIJx2bJ_0qWaBQHLPOfdURXvmZdcypEQ-Arfrzf/pub?output=csv";
 
-// A provider whose most recent attestation is older than this is
-// considered stale and gets bumped to "Waitlist Available" regardless of
-// what the main sheet says. ~100 days gives about a 3-week grace period
-// past the raw 3-month cadence for mailing-list/reminder lag.
+// A provider's most recent attestation (or, for someone who's never
+// attested, see BOOTSTRAP_ATTESTATION_DATE below) is considered stale
+// once it's older than this -- 100 days running continuously from
+// whenever they last attested, not tied to calendar quarters. Reminder
+// emails go out once a quarter, but that's just a nudge; the actual
+// staleness clock is a rolling 100 days per person.
 const ATTESTATION_STALE_DAYS = 100;
 
-// Providers who have NEVER submitted an attestation are left alone (main
-// sheet status trusted as-is) until this date, to give the quarterly
-// system time to ramp up before anyone is penalized for not having used
-// it yet. From this date on, "never attested" is treated the same as "an
-// attestation so old it's stale" -- i.e. bumped to Waitlist Available.
-const NEVER_ATTESTED_GRACE_UNTIL = new Date("2027-04-01T00:00:00");
+// Providers who have never submitted an attestation are treated as if
+// they'd attested on this date, for the sole purpose of computing
+// staleness -- this is what makes the system self-bootstrapping without
+// a separate before/after cutover date. Before this date, "never
+// attested" computes as not-yet-stale (the clock hasn't started);
+// ATTESTATION_STALE_DAYS after it, "never attested" becomes stale the
+// same way an old real attestation would.
+const BOOTSTRAP_ATTESTATION_DATE = new Date("2027-01-01T00:00:00");
 
 // Defensive: the question is multiple-choice (single answer) now, not
 // checkboxes, so there's normally exactly one value here. If a legacy/
@@ -399,14 +403,15 @@ async function loadData() {
   return providers;
 }
 
-// Applies the quarterly "still accepting?" attestation responses
-// (already fetched as plain text -- see the Promise.all in loadData) to
-// each provider matched by name, either refreshing their accepting
-// status (if they attested recently) or bumping them to "Waitlist
-// Available" (if their attestation has gone stale). Providers who have
-// never submitted an attestation at all are left exactly as the main
-// sheet has them -- Project 2 only kicks in once someone has attested at
-// least once. An empty/unreachable attestation feed (fetchTextOrEmpty
+// Applies the "still accepting?" attestation responses (already fetched
+// as plain text -- see the Promise.all in loadData) to each provider
+// matched by name, either refreshing their accepting status (if they
+// attested within the last ATTESTATION_STALE_DAYS) or bumping them to
+// "Waitlist Available" (if too much time has passed since their last
+// attestation -- or since BOOTSTRAP_ATTESTATION_DATE, for someone who's
+// never attested at all). Reminder emails go out once a quarter, but the
+// staleness math itself is a rolling 100 days per person, not tied to
+// quarters. An empty/unreachable attestation feed (fetchTextOrEmpty
 // already swallowed that error) just means nothing here changes.
 function applyAttestations(providers, attestationText) {
   const rows = parseCSV(attestationText).filter(r => r.length > 1);
@@ -427,23 +432,45 @@ function applyAttestations(providers, attestationText) {
 
   const now = Date.now();
   const staleMs = ATTESTATION_STALE_DAYS * 24 * 60 * 60 * 1000;
+  const bootstrapTs = BOOTSTRAP_ATTESTATION_DATE.getTime();
+
+  const WAITLIST_TIER = ACCEPTING_TIERS.indexOf("Waitlist Available");
 
   for (const p of providers) {
-    const key = normalizeName((p.firstName + " " + p.lastName).trim() || p.organization);
+    // Organization-only listings (no individual first/last name) are
+    // exempt from the whole attestation/staleness system -- there's no
+    // name for them to attest under, and they were never expected to.
+    // Whatever the main sheet says for them is trusted permanently.
+    if (!p.firstName && !p.lastName) continue;
+
+    const key = normalizeName((p.firstName + " " + p.lastName).trim());
     const attestation = latestByName.get(key);
+    // The effective "last attested" timestamp: a real attestation if they
+    // have one, otherwise BOOTSTRAP_ATTESTATION_DATE -- this is what lets
+    // "never attested" and "attested a while ago" share one rolling
+    // 100-day-staleness rule instead of two separate mechanisms. Before
+    // the bootstrap date, (now - effectiveTs) is negative for anyone who
+    // hasn't attested, so they're never treated as stale yet.
+    const effectiveTs = attestation ? attestation.timestamp : bootstrapTs;
 
-    if (!attestation) {
-      // Never attested at all. Left alone (trust whatever the main sheet
-      // / legacy import says) until the grace period ends; from that date
-      // on, "never attested" is treated the same as "stale."
-      if (now >= NEVER_ATTESTED_GRACE_UNTIL.getTime()) p.accepting = "Waitlist Available";
+    // Staleness only ever pulls someone DOWN to "Waitlist Available" --
+    // it never pulls someone UP. In ACCEPTING_TIERS, "Waitlist Available"
+    // actually ranks BETTER than "By PCP Referral Only" and "No", so a
+    // naive unconditional override would wrongly "promote" those two up
+    // to Waitlist just because they haven't re-attested. A provider
+    // already sitting at "No" or "By PCP Referral Only" stays exactly
+    // there regardless of how stale their attestation is; only a genuine
+    // new attestation (handled below) can move them off of it. Only
+    // someone currently at "Yes" (strictly better than Waitlist) is
+    // actually eligible to be pulled down.
+    const eligibleForDemotion = acceptingTier(p.accepting) < WAITLIST_TIER;
+
+    if (now - effectiveTs > staleMs) {
+      if (eligibleForDemotion) p.accepting = "Waitlist Available";
       continue;
     }
 
-    if (now - attestation.timestamp > staleMs) {
-      p.accepting = "Waitlist Available";
-      continue;
-    }
+    if (!attestation) continue; // not stale yet, nothing to apply
 
     // A real, recent attestation proves this person is actually active --
     // even if they were originally a legacy-import entry, stop treating
