@@ -27,20 +27,26 @@
   </section>
 
   <section class="filters" aria-label="Filters">
-    <div class="filter-row">
-      <input type="text" id="nameSearch" placeholder="Search by name or organization&hellip;" aria-label="Search by name">
-      <button id="resetBtn" type="button">Reset</button>
-    </div>
-    <div class="filter-grid">
+    <div class="filter-grid filter-grid-primary">
       <select id="f-accepting" aria-label="Accepting new patients"></select>
       <select id="f-insurance" aria-label="Insurance and payment"></select>
       <select id="f-format" aria-label="Telehealth / in-person"></select>
       <select id="f-location" aria-label="Location"></select>
+    </div>
+
+    <button id="moreFiltersToggle" class="more-filters-toggle" type="button" aria-expanded="false">More filters &#9662;</button>
+
+    <div class="filter-grid filter-grid-extra" id="extraFilters">
       <select id="f-age" aria-label="Age groups"></select>
       <select id="f-specialties" aria-label="Specialties"></select>
       <select id="f-approaches" aria-label="Treatment approaches"></select>
-      <select id="f-gender" aria-label="Gender"></select>
+      <select id="f-gender" aria-label="Therapist gender"></select>
       <select id="f-language" aria-label="Language"></select>
+    </div>
+
+    <div class="filter-row-bottom">
+      <input type="text" id="nameSearch" placeholder="Search by name or organization&hellip;" aria-label="Search by name">
+      <button id="resetBtn" type="button">Reset Filter</button>
     </div>
   </section>
 
