@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Find a Therapist | Kauai Mental Health Connection</title>
+<link rel="icon" href="https://static.wixstatic.com/media/b061da_3664a90199754da2a704dbaf52e5cc79~mv2.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Jost:wght@300;400;500;600&family=Nunito+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="site-header">
+  <a class="brand" href="https://www.kauaimentalhealthconnection.com" target="_blank" rel="noopener">
+    <img src="https://static.wixstatic.com/media/b061da_3664a90199754da2a704dbaf52e5cc79~mv2.png" alt="Kauai Mental Health Connection logo">
+    <span>Kauai Mental Health Connection</span>
+  </a>
+  <a class="back-link" href="https://www.kauaimentalhealthconnection.com" target="_blank" rel="noopener">&larr; Back to main site</a>
+</header>
+
+<main>
+  <section class="intro">
+    <h1>Find a Therapist</h1>
+    <p>Browse mental health providers serving Kaua&#699;i. Use the filters below to narrow your search, or search by name.</p>
+  </section>
+
+  <section class="filters" aria-label="Filters">
+    <div class="filter-row">
+      <input type="text" id="nameSearch" placeholder="Search by name or organization&hellip;" aria-label="Search by name">
+      <button id="resetBtn" type="button">Reset</button>
+    </div>
+    <div class="filter-grid">
+      <select id="f-accepting" aria-label="Accepting new patients"></select>
+      <select id="f-insurance" aria-label="Insurance and payment"></select>
+      <select id="f-format" aria-label="Telehealth / in-person"></select>
+      <select id="f-location" aria-label="Location"></select>
+      <select id="f-age" aria-label="Age groups"></select>
+      <select id="f-specialties" aria-label="Specialties"></select>
+      <select id="f-approaches" aria-label="Treatment approaches"></select>
+      <select id="f-gender" aria-label="Gender"></select>
+      <select id="f-language" aria-label="Language"></select>
+    </div>
+  </section>
+
+  <section class="status" id="statusLine" role="status"></section>
+
+  <section class="results" id="results" aria-label="Providers"></section>
+
+  <button id="loadMoreBtn" type="button" class="load-more" hidden>Show more</button>
+</main>
+
+<footer class="site-footer">
+  <p>Kaua&#699;i Mental Health Connection &middot; This directory updates automatically from our provider list.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
