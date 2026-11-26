@@ -92,6 +92,17 @@ const ACCEPTING_LABELS = {
 
 const FORMAT_OPTIONS = ["Telehealth Only", "In-Person Only", "Both telehealth & in-person options"];
 
+// Simplified filter the person actually picks from: "Telehealth" or
+// "In-Person" (plus the default "Any"). A provider who offers both counts
+// as a match for either simplified choice, since someone who wants
+// telehealth is also served by a provider who offers both, and likewise
+// for in-person.
+const FORMAT_FILTER_OPTIONS = ["Telehealth", "In-Person"];
+const FORMAT_FILTER_GROUPS = {
+  "telehealth": ["telehealth only", "both telehealth & in-person options"],
+  "in-person": ["in-person only", "both telehealth & in-person options"]
+};
+
 const AGE_GROUP_OPTIONS = ["Children (0-12)", "Adolescents (13-17)", "Young adults (18-25)", "Adults (26-64)", "Seniors (65+)"];
 
 const SPECIALTY_OPTIONS = [
@@ -209,6 +220,12 @@ function matchesGender(fieldValue, filterValue) {
   if (!filterValue) return true;
   if (String(fieldValue || "").trim().toLowerCase() === ORG_GENDER_WILDCARD) return true;
   return matchesExact(fieldValue, filterValue);
+}
+
+function matchesFormat(fieldValue, filterValue) {
+  if (!filterValue) return true;
+  const target = FORMAT_FILTER_GROUPS[filterValue.trim().toLowerCase()] || [];
+  return splitExact(fieldValue).some(v => target.includes(v.toLowerCase()));
 }
 
 function matchesRegion(locationValue, region) {
@@ -509,7 +526,7 @@ function populateFilters() {
     v => ACCEPTING_LABELS[v.toLowerCase()] || v
   );
   fillSelect(document.getElementById("f-insurance"), INSURANCE_OPTIONS, "Insurance / Payment: Any");
-  fillSelect(document.getElementById("f-format"), FORMAT_OPTIONS, "Telehealth / In-person: Any");
+  fillSelect(document.getElementById("f-format"), FORMAT_FILTER_OPTIONS, "Telehealth / In-person: Any");
   fillSelect(document.getElementById("f-location"), REGIONS, "Location: Any region");
   fillSelect(document.getElementById("f-age"), AGE_GROUP_OPTIONS, "Age groups: Any");
   fillSelect(document.getElementById("f-specialties"), SPECIALTY_OPTIONS, "Specialties: Any");
@@ -542,7 +559,7 @@ function runFilter() {
     }
     if (accepting && !matchesExact(it.accepting, accepting)) return false;
     if (insurance && !matchesExact(it.insurance, insurance)) return false;
-    if (format && !matchesExact(it.format, format)) return false;
+    if (format && !matchesFormat(it.format, format)) return false;
     if (region && !matchesRegion(it.location, region)) return false;
     if (age && !matchesExact(it.ageGroups, age)) return false;
     if (specialties && !matchesExact(it.specialties, specialties)) return false;
